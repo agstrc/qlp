@@ -52,9 +52,12 @@ func (matches Matches) MarshalJSON() ([]byte, error) {
 }
 
 // lineHeaderExpr is a regular expression to match the header of each line in the log file.
+// It handles a special case of the log format found at the example, which is
+//
+//	26  0:00 ------------------------------------------------------------
 //
 // e.g. " 0:00 InitGame: \n", it matches " 0:00 ".
-var lineHeaderExpr = regexp.MustCompile(`^\s*\d+:\d+\s`)
+var lineHeaderExpr = regexp.MustCompile(`^\s*\d+:\d+\s|^\s*[\d\s:]+`)
 
 // ParseLog reads and parses the log from an io.Reader, returning a slice of Matches or an error.
 func ParseLog(log io.Reader) (Matches, error) {
@@ -161,7 +164,9 @@ func newMatchParser() *matchParser {
 var killExpr = regexp.MustCompile(`(?:Kill:\s\d+\s\d+\s\d+:\s)(.+)(?:\skilled\s)(.+)(?:\sby\s)([\w]+)`)
 
 func (m *matchParser) parseEvent(p *logParser, event string) (eventParser, error) {
-	if event == "ShutdownGame:" {
+	// this is used instead of ShutdownGame to match the issue at the example log at line
+	// 97
+	if strings.HasPrefix(event, "---") {
 		finishedMatch := Match{
 			TotalKills:   m.totalKills,
 			Players:      m.getPlayerList(),
