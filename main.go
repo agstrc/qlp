@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 
 	"github.com/agstrc/qlp/qlp"
 	"github.com/urfave/cli/v2"
@@ -11,11 +12,12 @@ import (
 
 func main() {
 	app := &cli.App{
-		Name:        "QLP Parser",
-		Usage:       "Parses game data from a file and outputs it in JSON format.",
-		UsageText:   "qlp-parser [command options] [file]",
-		Description: "This program takes a file path as an argument, parses the game data contained within, and outputs the data in a nicely formatted JSON structure.",
-		ArgsUsage:   "[file]",
+		Usage:           "Parses game data from a file and outputs it in JSON format.",
+		UsageText:       path.Base(os.Args[0]) + " [file]",
+		ArgsUsage:       "[file]",
+		Description:     "This program takes a file path as an argument, parses the game data contained within, and outputs the data in a nicely formatted JSON structure.",
+		Args:            true,
+		HideHelpCommand: true,
 		Action: func(c *cli.Context) error {
 			if c.NArg() == 0 {
 				cli.ShowAppHelpAndExit(c, 1)
@@ -38,6 +40,7 @@ func main() {
 				return cli.Exit(fmt.Sprintf("Failed to marshal game data: %s", err), 4)
 			}
 			os.Stdout.Write(jsonOutput)
+
 			return nil
 		},
 	}

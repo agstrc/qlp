@@ -1,17 +1,20 @@
+// Package qlp implements a Quake log parser for the Quake III Arena game. The parser reads
+// a log file and returns the information for each match.
 package qlp
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
+	"strings"
 )
 
-// Match represents the information for a single match. It contains the total number of kills,
-// the list of players and the number of kills for each player. Additionally, it contains the
-// number of kills by means of death.
+// Match represents the information for a single match.
 type Match struct {
 	TotalKills   int            `json:"total_kills"`
 	Players      []string       `json:"players"`
@@ -24,11 +27,13 @@ type Match struct {
 // map because marshaling a map does not guarantee the order of the elements.
 type Matches []Match
 
-func (m Matches) MarshalJSON() ([]byte, error) {
+// MarshalJSON customizes the JSON representation of Matches. It returns a JSON object
+// with the keys "game_1", "game_2", etc. for each match.
+func (matches Matches) MarshalJSON() ([]byte, error) {
 	buff := bytes.Buffer{}
 	buff.WriteRune('{')
 
-	for i, game := range m {
+	for i, game := range matches {
 		buff.WriteString(fmt.Sprintf(`"game_%d":`, i+1)) // 1-indexed
 		gameJSON, err := json.Marshal(game)
 		if err != nil {
@@ -36,7 +41,7 @@ func (m Matches) MarshalJSON() ([]byte, error) {
 		}
 		buff.Write(gameJSON)
 
-		hasNext := i < len(m)-1
+		hasNext := i < len(matches)-1
 		if hasNext {
 			buff.WriteRune(',')
 		}
@@ -46,118 +51,155 @@ func (m Matches) MarshalJSON() ([]byte, error) {
 	return buff.Bytes(), nil
 }
 
-// For more information about the patterns, I suggest trying them out at https://regex101.com
-// The following patterns use non capturing groups in order to return only the relevant
-// information.
-var (
-	// eventExpr matches the relevant events for the parser. These are InitGame and Kill.
-	eventExpr = regexp.MustCompile(`^(?:\s+\d{1,2}:\d{2}\s)(InitGame|Kill)`)
+// lineHeaderExpr is a regular expression to match the header of each line in the log file.
+//
+// e.g. " 0:00 InitGame: \n", it matches " 0:00 ".
+var lineHeaderExpr = regexp.MustCompile(`^\s*\d+:\d+\s`)
 
-	// killExpr matches the Kill events. Through the use of groups, they return the killer,
-	// the victim and the means of death.
-	killExpr = regexp.MustCompile(`^(?:\s+\d{1,2}:\d{2}\s)(?:Kill:\s[\d\s]+:\s)(.+)(?:\skilled\s)(.+)(?:\sby\s)(.+)`)
-)
+// ParseLog reads and parses the log from an io.Reader, returning a slice of Matches or an error.
+func ParseLog(log io.Reader) (Matches, error) {
+	scanner := bufio.NewScanner(log)
+	parser := newLogParser()
 
-// ParseLog parses a Quake 3 log file and returns the information for each match.
-func ParseLog(source io.Reader) (Matches, error) {
-	scanner := bufio.NewScanner(source)
-	var matches Matches
-
-	if err := skipInitGameEvent(scanner); err != nil {
-		return nil, fmt.Errorf("failed to read log file: %w", err)
-	}
-
-	currentMatch := newMatchInfo()
+	currentLine := 0
 	for scanner.Scan() {
+		currentLine++
+
 		line := scanner.Text()
-		matched := eventExpr.FindStringSubmatch(line)
-		if len(matched) == 0 {
-			continue
+
+		indexes := lineHeaderExpr.FindStringIndex(line)
+		if indexes == nil {
+			return nil, fmt.Errorf("line %d is malformed", currentLine)
 		}
 
-		event := matched[1]
-		if event == "InitGame" {
-			match := Match{
-				TotalKills:   currentMatch.totalKills,
-				Players:      currentMatch.getPlayerList(),
-				Kills:        currentMatch.kills,
-				KillsByMeans: currentMatch.killsByMeans,
-			}
-			matches = append(matches, match)
-			currentMatch = newMatchInfo()
-			continue
+		event := line[indexes[1]:]
+		nextParser, err := parser.evParser.parseEvent(parser, event)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse event: %w", err)
 		}
 
-		killEvent := killExpr.FindStringSubmatch(line)
-		if len(killEvent) == 0 {
-			return nil, fmt.Errorf("failed to find expected kill event at line %s", line)
-		}
-
-		killer, killed, killedBy := killEvent[1], killEvent[2], killEvent[3]
-		currentMatch.registerKillEvent(killer, killed, killedBy)
+		parser.evParser = nextParser
 	}
 
-	// since we use InitGame as a separator, the last game is not included withing the loop
-	match := Match{
-		TotalKills:   currentMatch.totalKills,
-		Players:      currentMatch.getPlayerList(),
-		Kills:        currentMatch.kills,
-		KillsByMeans: currentMatch.killsByMeans,
-	}
-	matches = append(matches, match)
-
-	if scanner.Err() != nil {
-		return nil, fmt.Errorf("failed to read log file: %w", scanner.Err())
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 
-	return matches, nil
+	if _, ok := parser.evParser.(*matchParser); ok {
+		return nil, errors.New("log entries ended while a match was still open")
+	}
+
+	return parser.matches, nil
 }
 
-// matchInfo is an internal type used to store game data while parsing a log file.
-type matchInfo struct {
+// logParser is an internal type that holds the state of the parsing process.
+type logParser struct {
+	evParser eventParser
+	matches  Matches
+}
+
+// newLogParser creates and returns a new instance of logParser.
+func newLogParser() *logParser {
+	return &logParser{evParser: lookingForGameParser{}}
+}
+
+// parseEvent processes an event string with the current event parser, updating the parser's
+// state accordingly.
+func (p *logParser) parseEvent(event string) error {
+	nextParser, err := p.evParser.parseEvent(p, event)
+	if err != nil {
+		return err
+	}
+
+	p.evParser = nextParser
+	return nil
+}
+
+// eventParser is an interface that defines the methods that must be implemented by the
+// different types of parsers. Within the parser, the eventParser is responsible for
+// parsing the events and returning the next parser to be used.
+type eventParser interface {
+	parseEvent(p *logParser, event string) (eventParser, error)
+}
+
+// lookingForGameParser is the initial parser that is used to look for the "InitGame" event.
+type lookingForGameParser struct{}
+
+// parseEvent checks if the event is the "InitGame" event. If it is, it returns a new
+// matchParser, otherwise it returns itself.
+func (lfg lookingForGameParser) parseEvent(p *logParser, event string) (eventParser, error) {
+	if !strings.HasPrefix(event, "InitGame:") {
+		return lfg, nil
+	}
+
+	matchParser := newMatchParser()
+	return matchParser, nil
+}
+
+// matchParser is the parser that is used to parse the events of a match. It keeps track of
+// the expected data, and when the "ShutdownGame" event is found, it creates a Match object
+// and appends it to the list of matches. After that, it returns to the lookingForGameParser.
+type matchParser struct {
 	totalKills   int
 	players      map[string]struct{}
 	kills        map[string]int
 	killsByMeans map[string]int
 }
 
-func newMatchInfo() *matchInfo {
-	return &matchInfo{
+// newMatchParser creates and returns a new instance of matchParser.
+func newMatchParser() *matchParser {
+	return &matchParser{
 		players:      make(map[string]struct{}),
 		kills:        make(map[string]int),
 		killsByMeans: make(map[string]int),
 	}
 }
 
-// skipInitGameEvent skips an InitGame event. This is necessary because the log file contains
-// a single "InitGame" event which is not preceded by a "ShutdownGame" event. Therefore we use
-// InitGame, as opposed to ShutdownGame, to separate games. Due to this, the first game is not
-// preceded by an InitGame event and must be skipped.
-func skipInitGameEvent(scanner *bufio.Scanner) error {
-	for scanner.Scan() {
-		line := scanner.Text()
-		if eventExpr.MatchString(line) {
-			break
+// killExpr matches the Kill events. It captures constante elements such as "Kill",
+// "killed" and "by" in non capturing groups. The capturing groups output the killer,
+// the victim and the means of death.
+var killExpr = regexp.MustCompile(`(?:Kill:\s\d+\s\d+\s\d+:\s)(.+)(?:\skilled\s)(.+)(?:\sby\s)([\w]+)`)
+
+func (m *matchParser) parseEvent(p *logParser, event string) (eventParser, error) {
+	if event == "ShutdownGame:" {
+		finishedMatch := Match{
+			TotalKills:   m.totalKills,
+			Players:      m.getPlayerList(),
+			Kills:        m.kills,
+			KillsByMeans: m.killsByMeans,
 		}
+		p.matches = append(p.matches, finishedMatch)
+		return lookingForGameParser{}, nil
 	}
 
-	return scanner.Err()
+	matchingGroups := killExpr.FindStringSubmatch(event)
+	if len(matchingGroups) == 0 {
+		return m, nil
+	}
+
+	killer, killed, killedBy := matchingGroups[1], matchingGroups[2], matchingGroups[3]
+	m.registerKill(killer, killed, killedBy)
+
+	return m, nil
 }
 
-func (m *matchInfo) registerKillEvent(killer, killed, means string) {
-	// TODO: verify whether players killing themselves should be counted as a kill
+// registerKill registers a kill event in the matchParser's state. It increments the total
+// kills, updates the kills count for the killer and the killed player, and increments the
+// count for the means of death.
+func (m *matchParser) registerKill(killer, killed, killedBy string) {
+	m.totalKills++
 
 	for _, player := range [...]string{killer, killed} {
 		if player == "<world>" {
 			continue
 		}
 
-		m.players[player] = struct{}{}
-		// the following is crucial to make sure even 0-kill players are included in the
-		// kills map
+		// this conditional is crucial to make sure even 0 kill players are included
+		// in the match info
 		if _, ok := m.kills[player]; !ok {
 			m.kills[player] = 0
 		}
+		m.players[player] = struct{}{}
 	}
 
 	if killer == "<world>" {
@@ -166,13 +208,16 @@ func (m *matchInfo) registerKillEvent(killer, killed, means string) {
 		m.kills[killer]++
 	}
 
-	m.killsByMeans[means]++
+	m.killsByMeans[killedBy]++
 }
 
-func (m *matchInfo) getPlayerList() []string {
+// getPlayerList returns a slice with the names of the players in the match, sorted alphabetically.
+func (m *matchParser) getPlayerList() []string {
 	players := make([]string, 0, len(m.players))
 	for player := range m.players {
 		players = append(players, player)
 	}
+
+	slices.Sort(players) // sort the players alphabetically
 	return players
 }
