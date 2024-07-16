@@ -209,7 +209,7 @@ func (m *matchParser) registerKill(killer, killed, killedBy string) {
 
 	if killer == "<world>" {
 		m.kills[killed]--
-	} else {
+	} else if killer != killed {
 		m.kills[killer]++
 	}
 
