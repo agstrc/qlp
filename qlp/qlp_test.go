@@ -35,9 +35,11 @@ func TestKillEventHandling(t *testing.T) {
 	p := newLogParser()
 	p.parseEvent("InitGame:")
 	p.parseEvent("Kill: 0 1 2: Isgalamido killed Mocinha by MOD_ROCKET")
+	p.parseEvent("Kill: 0 1 2: Isgalamido killed Isgalamido by MOD_ROCKET")
 	p.parseEvent(matchSeparator)
 	match := p.matches[0]
 	assert.Equal(t, 1, match.Kills["Isgalamido"])
+	assert.Equal(t, 2, match.TotalKills)
 	assert.Contains(t, match.Players, "Isgalamido")
 	assert.Contains(t, match.Players, "Mocinha")
 }
@@ -49,6 +51,9 @@ func TestKillEventWithWorldKiller(t *testing.T) {
 	p.parseEvent(matchSeparator)
 	match := p.matches[0]
 	assert.Equal(t, -1, match.Kills["Mocinha"])
+	assert.Contains(t, match.Players, "Mocinha")
+	assert.Equal(t, 1, match.TotalKills)
+	assert.Equal(t, 1, match.KillsByMeans["MOD_ROCKET"])
 }
 
 func TestMultipleMatches(t *testing.T) {
@@ -76,10 +81,11 @@ func TestKillByMeansCounting(t *testing.T) {
 	p.parseEvent("InitGame:")
 	p.parseEvent("Kill: 0 1 2: Isgalamido killed Mocinha by MOD_ROCKET")
 	p.parseEvent("Kill: 0 1 2: <world> killed Mocinha by MOD_TRIGGER_HURT")
+	p.parseEvent("Kill: 0 1 2: Mocinha killed Mocinha by MOD_TRIGGER_HURT")
 	p.parseEvent(matchSeparator)
 	match := p.matches[0]
 	assert.Equal(t, 1, match.KillsByMeans["MOD_ROCKET"])
-	assert.Equal(t, 1, match.KillsByMeans["MOD_TRIGGER_HURT"])
+	assert.Equal(t, 2, match.KillsByMeans["MOD_TRIGGER_HURT"])
 }
 
 func TestLogEntriesEndedWhileMatchStillOpen(t *testing.T) {
@@ -113,7 +119,7 @@ func TestParseLog(t *testing.T) {
 	assert.Equal(t, 11, secondMatch.TotalKills)
 	assert.Equal(t, 2, len(secondMatch.Kills))
 	assert.Equal(t, 2, len(secondMatch.Players))
-	assert.Equal(t, -5, secondMatch.Kills["Isgalamido"])
+	assert.Equal(t, -7, secondMatch.Kills["Isgalamido"])
 
 	thirdMatch := matches[2]
 	assert.Equal(t, 4, thirdMatch.TotalKills)
